@@ -55,7 +55,21 @@ service, so `workers > 0` would silently kill live notifications.
 |---|---|---|
 | `ODOO_ADMIN_PASSWORD` | yes | administrator password, re-applied every boot |
 | `ODOO_MASTER_PASSWORD` | yes | `admin_passwd`; the database manager stays disabled regardless |
-| `PGHOST` `PGPORT` `PGUSER` `PGPASSWORD` | yes | Postgres connection |
-| `ODOO_DB_NAME` | baked | `odoo` |
-| `ODOO_ADMIN_LOGIN` | baked | `admin` |
+| `ODOO_PGHOST` | yes | Postgres host |
+| `ODOO_PGSUPERPASSWORD` | yes | superuser password, used once per boot to bootstrap the role |
+| `ODOO_DB_PASSWORD` | yes | password for the dedicated `odoo` role |
+| `ODOO_PGPORT` `ODOO_PGSUPERUSER` | baked | `5432`, `postgres` |
+| `ODOO_DB_NAME` `ODOO_DB_USER` `ODOO_ADMIN_LOGIN` | baked | `odoo`, `odoo`, `admin` |
 | `PORT` | injected | HTTP listen port |
+
+Two Postgres traps this handles, both measured against the stock images:
+
+- Odoo aborts on a `db_user` named `postgres` (*"Using the database user 'postgres'
+  is a security risk, aborting."*), so pointing it straight at the stock Postgres
+  service crash-loops. The entrypoint creates a dedicated `odoo` role and a
+  database owned by it, idempotently, re-applying the password each boot.
+- **Odoo's config layer reads the libpq environment and it overrides
+  `odoo.conf`.** With `PGPASSWORD` set, `db_password` parsed out as the libpq
+  value and the first boot died with `password authentication failed for user
+  "odoo"` while the same credentials worked from `psql`. Hence the `ODOO_PG*`
+  names, and an explicit `unset` of every `PG*` variable before Odoo runs.
