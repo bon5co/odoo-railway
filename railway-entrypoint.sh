@@ -32,13 +32,32 @@ GID_ODOO=101
 [ -n "${ODOO_ADMIN_PASSWORD:-}" ] || die "ODOO_ADMIN_PASSWORD is empty. A stock Odoo accepts the documented default administrator password on the public URL."
 [ -n "${ODOO_MASTER_PASSWORD:-}" ] || die "ODOO_MASTER_PASSWORD is empty. The database manager would then accept the compiled-in default and hand any visitor a full database backup."
 
-# PGPORT and PGUSER are defaulted here rather than published as template
-# variables: templateGenerate drops a literal defaultValue, so a literal would
-# reach the deploy form as a blank required field.
-: "${PGHOST:?PGHOST is required}"
-: "${PGPORT:=5432}"
-: "${PGUSER:=postgres}"
-: "${PGPASSWORD:?PGPASSWORD is required}"
+# The superuser connection, used once per boot to bootstrap the role and the
+# database, then dropped. Odoo itself never uses it:
+# `odoo.cli.server.check_postgres_user` aborts on a db_user literally named
+# "postgres" ("Using the database user 'postgres' is a security risk,
+# aborting."), which crash-loops any deploy pointed straight at the stock
+# Postgres image.
+#
+# These are deliberately NOT called PGHOST/PGUSER/PGPASSWORD. Odoo's own config
+# layer reads the libpq environment and it OVERRIDES the config file --
+# measured: with PGPASSWORD set, `db_password` parsed out of odoo.conf as the
+# libpq value, and the init run died with "password authentication failed for
+# user odoo" while the very same credentials worked from psql. The libpq
+# variables are exported only around the psql calls that want them.
+#
+# The port and the superuser name are defaulted here rather than published as
+# template variables: templateGenerate drops a literal defaultValue, so a
+# literal would reach the deploy form as a blank required field.
+: "${ODOO_PGHOST:?ODOO_PGHOST is required}"
+: "${ODOO_PGPORT:=5432}"
+: "${ODOO_PGSUPERUSER:=postgres}"
+: "${ODOO_PGSUPERPASSWORD:?ODOO_PGSUPERPASSWORD is required}"
+: "${ODOO_DB_USER:=odoo}"
+[ -n "${ODOO_DB_PASSWORD:-}" ] || die "ODOO_DB_PASSWORD is empty."
+
+# Nothing downstream may inherit a libpq environment.
+unset PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE PGSERVICE PGOPTIONS
 
 # --- volume -----------------------------------------------------------------
 mkdir -p "$DATA_DIR"
@@ -59,10 +78,10 @@ admin_passwd = ${ODOO_MASTER_PASSWORD}
 list_db = False
 db_name = ${DB_NAME}
 dbfilter = ^${DB_NAME}\$
-db_host = ${PGHOST}
-db_port = ${PGPORT}
-db_user = ${PGUSER}
-db_password = ${PGPASSWORD}
+db_host = ${ODOO_PGHOST}
+db_port = ${ODOO_PGPORT}
+db_user = ${ODOO_DB_USER}
+db_password = ${ODOO_DB_PASSWORD}
 proxy_mode = True
 workers = 0
 EOF
@@ -72,27 +91,45 @@ log "wrote $CONF (list_db=False, dbfilter=^${DB_NAME}\$, proxy_mode=True)"
 run_as_odoo() { setpriv --reuid="$UID_ODOO" --regid="$GID_ODOO" --clear-groups "$@"; }
 
 # --- wait for postgres ------------------------------------------------------
+su_psql() {
+    PGPASSWORD="$ODOO_PGSUPERPASSWORD" psql -h "$ODOO_PGHOST" -p "$ODOO_PGPORT" -U "$ODOO_PGSUPERUSER" "$@"
+}
+
 for i in $(seq 1 60); do
-    if PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -tAc 'select 1' >/dev/null 2>&1; then
+    if su_psql -d postgres -tAc 'select 1' >/dev/null 2>&1; then
         break
     fi
-    [ "$i" = 60 ] && die "postgres at $PGHOST:$PGPORT did not answer in 60s"
+    [ "$i" = 60 ] && die "postgres at $ODOO_PGHOST:$ODOO_PGPORT did not answer in 60s"
     sleep 1
 done
 
+# --- role and database ------------------------------------------------------
+# Everything below runs as the superuser and is idempotent. The role's password
+# is re-applied on every boot so it cannot drift from the deploy's variable.
+sql_quote() { printf "%s" "$1" | sed "s/'/''/g"; }
+
+if ! su_psql -d postgres -tAc "select 1 from pg_roles where rolname = '$(sql_quote "$ODOO_DB_USER")'" | grep -q 1; then
+    su_psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE \"${ODOO_DB_USER}\" LOGIN CREATEDB" >/dev/null
+    log "created role ${ODOO_DB_USER}"
+fi
+su_psql -d postgres -v ON_ERROR_STOP=1 -c \
+    "ALTER ROLE \"${ODOO_DB_USER}\" WITH LOGIN CREATEDB PASSWORD '$(sql_quote "$ODOO_DB_PASSWORD")'" >/dev/null
+
+if ! su_psql -d postgres -tAc "select 1 from pg_database where datname = '$(sql_quote "$DB_NAME")'" | grep -q 1; then
+    su_psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${DB_NAME}\" OWNER \"${ODOO_DB_USER}\"" >/dev/null
+    log "created database ${DB_NAME} owned by ${ODOO_DB_USER}"
+fi
+
 # --- first-boot initialisation ----------------------------------------------
 initialised=0
-if PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -tAc \
-        "select 1 from pg_database where datname = '${DB_NAME}'" | grep -q 1; then
-    if PGPASSWORD="$PGPASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DB_NAME" -tAc \
-            "select 1 from information_schema.tables where table_name = 'ir_module_module'" | grep -q 1; then
-        initialised=1
-    fi
+if su_psql -d "$DB_NAME" -tAc \
+        "select 1 from information_schema.tables where table_name = 'ir_module_module'" | grep -q 1; then
+    initialised=1
 fi
 
 if [ "$initialised" = 0 ]; then
     log "initialising database ${DB_NAME} (base only, no demo data)"
-    run_as_odoo odoo -c "$CONF" -d "$DB_NAME" -i base --without-demo=all --stop-after-init --no-http
+    run_as_odoo odoo -c "$CONF" -d "$DB_NAME" -i base --without-demo=True --stop-after-init --no-http
     log "database initialised"
 else
     log "database ${DB_NAME} already initialised"
