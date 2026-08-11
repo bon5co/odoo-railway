@@ -32,9 +32,12 @@ GID_ODOO=101
 [ -n "${ODOO_ADMIN_PASSWORD:-}" ] || die "ODOO_ADMIN_PASSWORD is empty. A stock Odoo accepts the documented default administrator password on the public URL."
 [ -n "${ODOO_MASTER_PASSWORD:-}" ] || die "ODOO_MASTER_PASSWORD is empty. The database manager would then accept the compiled-in default and hand any visitor a full database backup."
 
+# PGPORT and PGUSER are defaulted here rather than published as template
+# variables: templateGenerate drops a literal defaultValue, so a literal would
+# reach the deploy form as a blank required field.
 : "${PGHOST:?PGHOST is required}"
 : "${PGPORT:=5432}"
-: "${PGUSER:?PGUSER is required}"
+: "${PGUSER:=postgres}"
 : "${PGPASSWORD:?PGPASSWORD is required}"
 
 # --- volume -----------------------------------------------------------------
