@@ -1,5 +1,9 @@
 # odoo-railway
 
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/odoo-or-just-updated-erp-and-crm-nobody-?referralCode=Z1xivh&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
+**Deploy on Railway:** [Odoo template](https://railway.com/deploy/odoo-or-just-updated-erp-and-crm-nobody-?referralCode=Z1xivh&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
 Thin wrapper around the official `odoo:19.0` image for the Railway template
 `Odoo | (Just Updated) ERP & CRM Nobody Else Can Log Into`.
 
